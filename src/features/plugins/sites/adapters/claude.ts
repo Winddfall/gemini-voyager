@@ -9,7 +9,7 @@ export const claudeAdapter: SiteAdapter = {
   matches: ['https://claude.ai/*'],
   selectors: {
     userTurn: '[data-testid="user-message"]',
-    assistantTurn: '.font-claude-message, [data-testid="assistant-message"]',
+    assistantTurn: '.font-claude-response, [data-testid="assistant-message"]',
     composer: 'div[contenteditable="true"].ProseMirror',
     sidebar: 'nav[aria-label], [data-testid="menu-sidebar"]',
   },
