@@ -131,7 +131,10 @@ export class MarkdownFormatter {
       lines.push('');
 
       if (turn.userElement) {
-        const extracted = DOMContentExtractor.extractUserContent(turn.userElement);
+        const extracted = DOMContentExtractor.extractUserContent(
+          turn.userElement,
+          turn.imageSelectors,
+        );
         if (extracted.hasImages) {
           lines.push('*[This turn includes uploaded images]*');
           lines.push('');
@@ -146,7 +149,10 @@ export class MarkdownFormatter {
       lines.push('');
 
       if (turn.assistantElement) {
-        const extracted = DOMContentExtractor.extractAssistantContent(turn.assistantElement);
+        const extracted = DOMContentExtractor.extractAssistantContent(
+          turn.assistantElement,
+          turn.imageSelectors,
+        );
         const fallback = this.formatContent(turn.assistant);
         lines.push(extracted.text || fallback || '_No content_');
       } else {
@@ -165,7 +171,10 @@ export class MarkdownFormatter {
       lines.push('');
 
       if (turn.userElement) {
-        const extracted = DOMContentExtractor.extractUserContent(turn.userElement);
+        const extracted = DOMContentExtractor.extractUserContent(
+          turn.userElement,
+          turn.imageSelectors,
+        );
         if (extracted.hasImages) {
           lines.push('*[This turn includes uploaded images]*');
           lines.push('');
@@ -186,7 +195,10 @@ export class MarkdownFormatter {
       lines.push('');
 
       if (turn.assistantElement) {
-        const extracted = DOMContentExtractor.extractAssistantContent(turn.assistantElement);
+        const extracted = DOMContentExtractor.extractAssistantContent(
+          turn.assistantElement,
+          turn.imageSelectors,
+        );
         lines.push(extracted.text || assistantFallback || '_No content_');
       } else {
         lines.push(assistantFallback || '_No content_');

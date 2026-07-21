@@ -34,6 +34,8 @@ export interface ChatTurn {
   // Optional DOM elements for rich content extraction
   userElement?: HTMLElement;
   assistantElement?: HTMLElement;
+  /** Platform-specific image selectors from ExportPlatformAdapter.getImageSelectors(). */
+  imageSelectors?: string[];
 }
 
 /**

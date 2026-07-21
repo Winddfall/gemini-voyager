@@ -46,9 +46,11 @@ function queryOutsideThoughts<T extends Element = Element>(
 export class DOMContentExtractor {
   private static DEBUG = false;
   /**
-   * Extract user query content
+   * Extract user query content.
+   * @param imageSelectors - Platform-specific selectors for finding images.
+   *   Empty/omitted = use Gemini's built-in selectors only.
    */
-  static extractUserContent(element: HTMLElement): ExtractedContent {
+  static extractUserContent(element: HTMLElement, imageSelectors: string[] = []): ExtractedContent {
     const result: ExtractedContent = {
       text: '',
       html: '',
@@ -59,14 +61,20 @@ export class DOMContentExtractor {
       hasCode: false,
     };
 
-    // Check for images
-    const images = element.querySelectorAll('user-query-file-preview img, .preview-image');
+    // Check for images (Gemini selectors + platform selectors)
+    const geminiImageSelector = 'user-query-file-preview img, .preview-image';
+    const allImageSelectors =
+      imageSelectors.length > 0
+        ? `${geminiImageSelector}, ${imageSelectors.join(', ')}`
+        : geminiImageSelector;
+    const images = element.querySelectorAll(allImageSelectors);
+    console.log('[DOMContentExtractor] images:', images);
     result.hasImages = images.length > 0;
 
     const attachments = this.extractUserAttachments(element);
     result.attachments = attachments;
 
-    // Extract text from query-text-line paragraphs
+    // Extract text from query-text-line paragraphs (Gemini), with fallback for other platforms
     const textLines = element.querySelectorAll('.query-text-line');
     const textParts: string[] = [];
     textLines.forEach((line) => {
@@ -75,6 +83,11 @@ export class DOMContentExtractor {
       const text = this.normalizeText(raw);
       if (text) textParts.push(text);
     });
+    // Fallback: non-Gemini platforms don't have .query-text-line
+    if (textParts.length === 0) {
+      const fallback = this.normalizeText(element.textContent || '');
+      if (fallback) textParts.push(fallback);
+    }
     result.text = textParts.join('\n');
 
     // Build HTML representation
@@ -121,7 +134,10 @@ export class DOMContentExtractor {
   /**
    * Extract assistant response content with rich formatting
    */
-  static extractAssistantContent(element: HTMLElement): ExtractedContent {
+  static extractAssistantContent(
+    element: HTMLElement,
+    _imageSelectors: string[] = [],
+  ): ExtractedContent {
     if (this.DEBUG)
       console.log('[DOMContentExtractor] extractAssistantContent called, element:', element);
 
@@ -176,6 +192,29 @@ export class DOMContentExtractor {
     const htmlParts: string[] = [];
     const textParts: string[] = [];
 
+    // Platform image extraction: use querySelectorAll with adapter-provided selectors
+    // to find images directly, as a reliable fallback for non-Gemini platforms.
+    // processNodes() below also handles <img> via DOM walking, but that can miss
+    // images on platforms with different DOM structures.
+    const extractedImageSrcs = new Set<string>();
+    if (_imageSelectors.length > 0) {
+      const platformImages = messageContent.querySelectorAll(_imageSelectors.join(', '));
+      for (const imgEl of Array.from(platformImages)) {
+        const img = imgEl as HTMLImageElement;
+        const src = img.getAttribute('src') || img.src || '';
+        if (!src || src === 'about:blank') continue;
+        extractedImageSrcs.add(src);
+        const altRaw = img.getAttribute('alt') || '';
+        const alt = altRaw.trim() || 'Image';
+        result.hasImages = true;
+        htmlParts.push(
+          `<img src="${this.escapeHtmlAttribute(src)}" alt="${this.escapeHtmlAttribute(alt)}" />`,
+        );
+        const mdAlt = alt.replace(/\]/g, '\\]');
+        textParts.push(`\n![${mdAlt}](${src})\n`);
+      }
+    }
+
     // STRATEGY CHANGE: Instead of recursing through DOM (which misses Angular-rendered elements),
     // process the .markdown div directly and then search for response-elements
     const markdownDiv = messageContent.querySelector('.markdown, .markdown-main-panel');
@@ -197,13 +236,13 @@ export class DOMContentExtractor {
       }
 
       // First, process all direct children of markdown that are NOT response-element
-      this.processNodes(markdownDiv, htmlParts, textParts, result);
+      this.processNodes(markdownDiv, htmlParts, textParts, result, extractedImageSrcs);
 
       // Note: response-element contents are processed by processNodes recursion above
     } else {
       // Fallback to old method
       if (this.DEBUG) console.log('[DOMContentExtractor] No markdown div found, using fallback');
-      this.processNodes(messageContent, htmlParts, textParts, result);
+      this.processNodes(messageContent, htmlParts, textParts, result, extractedImageSrcs);
     }
 
     // Additionally, look for code blocks and tables at the element level
@@ -357,6 +396,7 @@ export class DOMContentExtractor {
     htmlParts: string[],
     textParts: string[],
     flags: Pick<ExtractedContent, 'hasImages' | 'hasFormulas' | 'hasTables' | 'hasCode'>,
+    skipImageSrcs: ReadonlySet<string> = new Set<string>(),
   ): void {
     const children = Array.from(container.children);
     if (this.DEBUG)
@@ -371,7 +411,13 @@ export class DOMContentExtractor {
     if (shadowRoot) {
       if (this.DEBUG)
         console.log('[DOMContentExtractor] Found Shadow DOM! Processing shadow children');
-      this.processNodes(shadowRoot as unknown as Element, htmlParts, textParts, flags);
+      this.processNodes(
+        shadowRoot as unknown as Element,
+        htmlParts,
+        textParts,
+        flags,
+        skipImageSrcs,
+      );
     }
 
     for (const child of children) {
@@ -403,7 +449,7 @@ export class DOMContentExtractor {
       if (tagName === 'img') {
         const img = child as HTMLImageElement;
         const src = img.getAttribute('src') || img.src || '';
-        if (src && src !== 'about:blank') {
+        if (src && src !== 'about:blank' && !skipImageSrcs.has(src)) {
           flags.hasImages = true;
           const altRaw = img.getAttribute('alt') || '';
           const alt = altRaw.trim() || 'Image';
@@ -414,6 +460,20 @@ export class DOMContentExtractor {
           textParts.push(`\n![${mdAlt}](${src})\n`);
         }
         continue;
+      }
+
+      // KaTeX block formula (used by ChatGPT, Claude, and other platforms)
+      // Must be checked BEFORE the Gemini-specific math-block handler
+      if (child.classList.contains('katex-display') || child.classList.contains('katex')) {
+        const latex = this.extractKatexLatex(child as HTMLElement);
+        if (latex) {
+          flags.hasFormulas = true;
+          htmlParts.push(
+            `<div class="math-block" data-math="${this.escapeHtml(latex)}">${child.outerHTML}</div>`,
+          );
+          textParts.push(`\n$$\n${latex}\n$$\n`);
+          continue;
+        }
       }
 
       // Math block (display formula) - check both class and data-math attribute
@@ -607,7 +667,7 @@ export class DOMContentExtractor {
         if (this.DEBUG)
           console.log('[DOMContentExtractor] Recursing into container:', tagName, child.className);
         // Recursively process children instead of extracting text directly
-        this.processNodes(child, htmlParts, textParts, flags);
+        this.processNodes(child, htmlParts, textParts, flags, skipImageSrcs);
         continue;
       }
 
@@ -767,6 +827,20 @@ export class DOMContentExtractor {
           return;
         }
 
+        // KaTeX inline formula (used by ChatGPT, Claude, and other platforms)
+        // Must be checked BEFORE the Gemini-specific math-inline handler
+        if (el.classList.contains('katex')) {
+          const latex = this.extractKatexLatex(el as HTMLElement);
+          if (latex) {
+            hasFormulas = true;
+            htmlParts.push(
+              `<span class="math-inline" data-math="${this.escapeHtml(latex)}">${el.outerHTML}</span>`,
+            );
+            textParts.push(`$${latex}$`);
+            return;
+          }
+        }
+
         // Inline formula - check both class and data-math attribute
         if (el.classList.contains('math-inline') || el.hasAttribute('data-math')) {
           const latex = el.getAttribute('data-math') || '';
@@ -836,6 +910,70 @@ export class DOMContentExtractor {
       text: textParts.join(''),
       hasFormulas,
     };
+  }
+
+  /**
+   * Extract LaTeX source from a KaTeX-rendered element.
+   * Works across platforms (ChatGPT, Claude, etc.) that use KaTeX.
+   *
+   * Extraction priority:
+   * 1. `annotation[encoding="application/x-tex"]` inside MathML
+   * 2. `data-latex` / `data-expression` attributes on the element or `.katex-expression` child
+   * 3. Walk `.katex-html > .base` children to reconstruct visible text (best-effort)
+   */
+  private static extractKatexLatex(element: HTMLElement): string {
+    // 1. annotation element (most reliable)
+    const annotation = element.querySelector('annotation[encoding="application/x-tex"]');
+    if (annotation?.textContent?.trim()) {
+      return annotation.textContent.trim();
+    }
+
+    // 2. data-latex / data-expression on element or container
+    const container = (element.querySelector('.katex-expression') as HTMLElement | null) || element;
+    const dataLatex =
+      container.getAttribute('data-latex') ||
+      container.getAttribute('data-expression') ||
+      element.getAttribute('data-latex') ||
+      element.getAttribute('data-expression');
+    if (dataLatex?.trim()) {
+      return dataLatex.trim();
+    }
+
+    // 3. Walk katex-html children to extract visible text (best-effort fallback)
+    const katexHtml = element.querySelector('.katex-html');
+    if (katexHtml) {
+      const text = this.extractKatexHtmlText(katexHtml as HTMLElement);
+      if (text.trim()) return text.trim();
+    }
+
+    return '';
+  }
+
+  /**
+   * Best-effort text extraction from KaTeX's rendered HTML.
+   * Walks `.katex-html > .base` children, extracting text from `.mord`, `.mbin`,
+   * `.mrel`, `.mop`, `.mpunct`, `.minner` spans while skipping invisible elements.
+   */
+  private static extractKatexHtmlText(element: HTMLElement): string {
+    const parts: string[] = [];
+    const walk = (node: Node): void => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = node.textContent || '';
+        if (t) parts.push(t);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node as HTMLElement;
+      // Skip invisible elements (struts, sizing spans)
+      if (el.classList.contains('strut') || el.classList.contains('pstrut')) return;
+      if (el.classList.contains('katex-mathml')) return; // hidden MathML
+      // Recurse into children
+      for (const child of Array.from(el.childNodes)) {
+        walk(child);
+      }
+    };
+    walk(element);
+    return parts.join('');
   }
 
   /**

@@ -131,7 +131,10 @@ export class ConversationExportService {
 
       // Extract rich content with Markdown formatting from DOM elements if available
       if (turn.userElement) {
-        const extracted = DOMContentExtractor.extractUserContent(turn.userElement);
+        const extracted = DOMContentExtractor.extractUserContent(
+          turn.userElement,
+          turn.imageSelectors,
+        );
         if (extracted.text) {
           userContent = extracted.text;
         }
@@ -139,7 +142,10 @@ export class ConversationExportService {
       }
 
       if (turn.assistantElement) {
-        const extracted = DOMContentExtractor.extractAssistantContent(turn.assistantElement);
+        const extracted = DOMContentExtractor.extractAssistantContent(
+          turn.assistantElement,
+          turn.imageSelectors,
+        );
         if (extracted.text) {
           assistantContent = extracted.text;
         }
@@ -334,7 +340,10 @@ export class ConversationExportService {
     }
 
     if (turn.assistantElement) {
-      const extracted = DOMContentExtractor.extractAssistantContent(turn.assistantElement);
+      const extracted = DOMContentExtractor.extractAssistantContent(
+        turn.assistantElement,
+        turn.imageSelectors,
+      );
       return {
         markdown: extracted.text || turn.assistant,
         html: extracted.html || this.formatPlainTextAsHtml(extracted.text || turn.assistant),
@@ -342,7 +351,10 @@ export class ConversationExportService {
     }
 
     if (turn.userElement) {
-      const extracted = DOMContentExtractor.extractUserContent(turn.userElement);
+      const extracted = DOMContentExtractor.extractUserContent(
+        turn.userElement,
+        turn.imageSelectors,
+      );
       return {
         markdown: extracted.text || turn.user,
         html: extracted.html || this.formatPlainTextAsHtml(extracted.text || turn.user),

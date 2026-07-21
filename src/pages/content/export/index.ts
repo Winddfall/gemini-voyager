@@ -29,7 +29,7 @@ import { ExportDialog } from '../../../features/export/ui/ExportDialog';
 import { resolveExportErrorMessage } from '../../../features/export/ui/ExportErrorMessage';
 import { showExportToast } from '../../../features/export/ui/ExportToast';
 import { assistantHasCanvasDoc, extractAllCanvasDocs, isAnyCanvasOpen } from './canvasDocExtractor';
-import { filterOutDeepResearchImmersiveNodes, resolveConversationRoot } from './conversationDom';
+import { filterOutDeepResearchImmersiveNodes } from './conversationDom';
 import {
   getConversationMenuContext,
   getResponseMenuContext,
@@ -38,6 +38,8 @@ import {
 } from './conversationMenuInjection';
 import { resolveExportLogoAnchor } from './exportLogoAnchor';
 import { mountPersistentExportToolbar } from './persistentExportToolbar';
+import { resolveExportAdapter } from './platformAdapters';
+import { resolveConversationRootForPlatform } from './platformConversationDom';
 import { injectResponseActionCopyImageButtons } from './responseActionImageButton';
 import { showResponseActionCopyImageMenu } from './responseActionImageMenu';
 import {
@@ -75,6 +77,9 @@ const GENERATED_UI_FRAME_SELECTOR = 'iframe[src*="gemini-code-immersive"]';
 const GENERATED_UI_SCREENSHOT_MESSAGE_TYPE = 'gv.generatedUi.captureVisibleTab';
 const GENERATED_UI_CAPTURE_PERMISSION_MESSAGE_TYPE = 'gv.generatedUi.ensureCapturePermission';
 const GENERATED_UI_SCREENSHOT_SECTION_CLASS = 'gv-generated-ui-screenshot-section';
+// Platform adapter — resolved once per page load
+const exportAdapter = resolveExportAdapter();
+
 let conversationMenuObserver: MutationObserver | null = null;
 let responseActionObserver: MutationObserver | null = null;
 let cachedCanvasDocs: CanvasDoc[] | null = null;
@@ -357,53 +362,21 @@ function filterTopLevel(elements: Element[]): HTMLElement[] {
 }
 
 function getConversationRoot(userSelectors: string[]): HTMLElement {
-  return resolveConversationRoot({ userSelectors, doc: document });
+  return resolveConversationRootForPlatform(exportAdapter, userSelectors, document);
 }
 
 function computeConversationId(): string {
-  return buildConversationIdFromUrl(window.location.href);
+  return (
+    exportAdapter.extractConversationIdFromUrl() || buildConversationIdFromUrl(window.location.href)
+  );
 }
 
 function getUserSelectors(): string[] {
-  const configured = (() => {
-    try {
-      return (
-        localStorage.getItem('geminiTimelineUserTurnSelector') ||
-        localStorage.getItem('geminiTimelineUserTurnSelectorAuto') ||
-        ''
-      );
-    } catch {
-      return '';
-    }
-  })();
-  const defaults = [
-    '.user-query-bubble-with-background',
-    '.user-query-bubble-container',
-    '.user-query-container',
-    'user-query-content .user-query-bubble-with-background',
-    'div[aria-label="User message"]',
-    'article[data-author="user"]',
-    'article[data-turn="user"]',
-    '[data-message-author-role="user"]',
-    'div[role="listitem"][data-user="true"]',
-  ];
-  return configured ? [configured, ...defaults.filter((s) => s !== configured)] : defaults;
+  return exportAdapter.getUserSelectors();
 }
 
 function getAssistantSelectors(): string[] {
-  return [
-    // Attribute-based roles
-    '[aria-label="Gemini response"]',
-    '[data-message-author-role="assistant"]',
-    '[data-message-author-role="model"]',
-    'article[data-author="assistant"]',
-    'article[data-turn="assistant"]',
-    'article[data-turn="model"]',
-    // Common Gemini containers
-    '.model-response, model-response',
-    '.response-container',
-    'div[role="listitem"]:not([data-user="true"])',
-  ];
+  return exportAdapter.getAssistantSelectors();
 }
 
 function dedupeByTextAndOffset(elements: HTMLElement[], firstTurnOffset: number): HTMLElement[] {
@@ -724,6 +697,7 @@ function buildTurnsForSelectedMessages(
       omitEmptySections: true,
       userElement: turn.user?.exportElement,
       assistantElement: turn.assistant?.exportElement,
+      imageSelectors: exportAdapter.getImageSelectors(),
     }))
     .filter(
       (turn) =>
@@ -998,73 +972,7 @@ function escapeCssAttributeValue(value: string): string {
 }
 
 function getConversationTitleForExport(): string {
-  // Strategy 1: Get from active conversation in Gemini Voyager Folder UI (most accurate)
-  try {
-    const activeFolderTitle =
-      document.querySelector(
-        '.gv-folder-conversation.gv-folder-conversation-selected .gv-conversation-title',
-      ) || document.querySelector('.gv-folder-conversation-selected .gv-conversation-title');
-
-    if (activeFolderTitle?.textContent?.trim()) {
-      return activeFolderTitle.textContent.trim();
-    }
-  } catch (error) {
-    try {
-      console.debug('[Export] Failed to get title from Folder Manager:', error);
-    } catch {}
-  }
-
-  // Strategy 1b: Get from Gemini native sidebar via current conversation ID
-  try {
-    const conversationId = extractConversationIdFromUrl();
-    if (conversationId) {
-      const title = extractTitleFromNativeSidebarByConversationId(conversationId);
-      if (title) return title;
-    }
-  } catch (error) {
-    try {
-      console.debug('[Export] Failed to get title from native sidebar by conversation id:', error);
-    } catch {}
-  }
-
-  // Strategy 2: Try to get from page title
-  const titleElement = document.querySelector('title');
-  if (titleElement) {
-    const title = titleElement.textContent?.trim();
-    if (isMeaningfulConversationTitle(title)) {
-      return title;
-    }
-  }
-
-  // Strategy 3: Try to get from sidebar conversation list (Gemini / AI Studio)
-  try {
-    const selectors = [
-      'mat-list-item.mdc-list-item--activated [mat-line]',
-      'mat-list-item[aria-current="page"] [mat-line]',
-      '.conversation-list-item.active .conversation-title',
-      '.active-conversation .title',
-    ];
-
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      const title = element?.textContent?.trim();
-      if (isMeaningfulConversationTitle(title)) {
-        return title;
-      }
-    }
-  } catch (error) {
-    try {
-      console.debug('[Export] Failed to get title from sidebar:', error);
-    } catch {}
-  }
-
-  // Strategy 4: URL fallback
-  const conversationId = extractConversationIdFromUrl();
-  if (conversationId) {
-    return `Conversation ${conversationId.slice(0, 8)}`;
-  }
-
-  return 'Untitled Conversation';
+  return exportAdapter.extractConversationTitle();
 }
 
 function findSidebarConversationLinkById(conversationId: string): HTMLAnchorElement | null {
@@ -1391,6 +1299,12 @@ async function executeExportSequence(
   initialSelectedMessageId?: string,
   imageWidth?: number,
 ): Promise<void> {
+  // Platforms that don't lazy-load history skip the preload loop.
+  if (!exportAdapter.shouldPreloadHistory()) {
+    await performFinalExport(format, dict, lang, fontSize, initialSelectedMessageId, imageWidth);
+    return;
+  }
+
   // Cache Canvas documents at the very start of the export sequence,
   // before we click the top node or cause any DOM updates/scrolling.
   if (!paramState && isAnyCanvasOpen()) {
@@ -2439,12 +2353,53 @@ function setupConversationMenuExportObserver({
 }
 
 export async function startExportButton(): Promise<void> {
-  // Check for pending export immediately
-  checkPendingExport();
+  // Pending-export recovery is Gemini-specific (SPA reload behaviour).
+  if (exportAdapter.shouldPreloadHistory()) {
+    checkPendingExport();
+  }
 
-  // i18n setup for tooltip and label
   const dict = await loadDictionaries();
   let lang = await getLanguage();
+  const t = (key: TranslationKey) => dict[lang]?.[key] ?? dict.en?.[key] ?? key;
+
+  // Platforms without Gemini's logo/menu UI: mount the persistent toolbar directly.
+  if (!exportAdapter.shouldPreloadHistory()) {
+    const toolbarHandle = mountPersistentExportToolbar({
+      label: t('pm_export'),
+      tooltip: t('exportChatJson'),
+      onClick: () => showExportDialog(dict, lang),
+    });
+    const onStorageChange = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string,
+    ) => {
+      if (area !== 'sync') return;
+      const nextRaw = changes[StorageKeys.LANGUAGE]?.newValue;
+      if (typeof nextRaw === 'string') {
+        const next = normalizeLang(nextRaw);
+        lang = next;
+        toolbarHandle.setText(
+          dict[next]?.['pm_export'] ?? dict.en?.['pm_export'] ?? 'Export',
+          dict[next]?.['exportChatJson'] ?? dict.en?.['exportChatJson'] ?? 'Export chat history',
+        );
+      }
+    };
+    try {
+      chrome.storage?.onChanged?.addListener(onStorageChange);
+      window.addEventListener(
+        'beforeunload',
+        () => {
+          try {
+            chrome.storage?.onChanged?.removeListener(onStorageChange);
+          } catch {}
+        },
+        { once: true },
+      );
+    } catch {}
+    return;
+  }
+
+  // --- Gemini path: logo anchor + menu injection ---
 
   setupConversationMenuExportObserver({
     dict,
@@ -2467,7 +2422,6 @@ export async function startExportButton(): Promise<void> {
     dict,
   });
 
-  const t0 = (key: TranslationKey) => dict[lang]?.[key] ?? dict.en?.[key] ?? key;
   // The lr26 UI removed the logo entirely; resolveExportLogoAnchor short-circuits
   // there instead of waiting out the full timeout (which delayed this fallback
   // toolbar by several seconds on every conversation load).
@@ -2500,8 +2454,8 @@ export async function startExportButton(): Promise<void> {
     const ensureToolbarVisibility = (enabled: boolean) => {
       if (enabled && !toolbarHandle) {
         toolbarHandle = mountPersistentExportToolbar({
-          label: t0('pm_export'),
-          tooltip: t0('exportChatJson'),
+          label: t('pm_export'),
+          tooltip: t('exportChatJson'),
           onClick: () => showExportDialog(dict, lang),
         });
       } else if (!enabled && toolbarHandle) {
@@ -2567,7 +2521,6 @@ export async function startExportButton(): Promise<void> {
     } catch {}
   });
 
-  const t = (key: TranslationKey) => dict[lang]?.[key] ?? dict.en?.[key] ?? key;
   const title = t('exportChatJson');
   const labelText = t('pm_export');
   btn.title = title;

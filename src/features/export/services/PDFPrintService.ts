@@ -537,12 +537,13 @@ export class PDFPrintService {
     const starredClass = turn.starred ? 'gv-print-turn-starred' : '';
 
     const userContent = turn.userElement
-      ? DOMContentExtractor.extractUserContent(turn.userElement).html || '<em>No content</em>'
+      ? DOMContentExtractor.extractUserContent(turn.userElement, turn.imageSelectors).html ||
+        '<em>No content</em>'
       : this.formatContent(turn.user) || '<em>No content</em>';
 
     const assistantContent = turn.assistantElement
-      ? DOMContentExtractor.extractAssistantContent(turn.assistantElement).html ||
-        '<em>No content</em>'
+      ? DOMContentExtractor.extractAssistantContent(turn.assistantElement, turn.imageSelectors)
+          .html || '<em>No content</em>'
       : this.formatContent(turn.assistant) || '<em>No content</em>';
 
     if (!turn.omitEmptySections) {
